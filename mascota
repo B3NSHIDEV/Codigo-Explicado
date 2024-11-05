@@ -1,0 +1,195 @@
+#include <WiFi.h>             // Librería para conexión WiFi
+#include <PubSubClient.h>      // Librería para comunicación MQTT
+#include <DHT.h>               // Librería para manejar el sensor DHT
+#include <Adafruit_GFX.h>      // Librería gráfica para la pantalla OLED
+#include <Adafruit_SH110X.h>   // Librería para pantallas OLED específicas
+#include <ArduinoJson.h>       // Librería para manejar datos JSON
+#include <time.h>              // Librería para manejar fecha y hora
+#include "dormido.h"           // Incluye archivos de imágenes para diferentes estados de la mascota
+#include "enojado.h"
+#include "hambriento.h"
+#include "normal.h"
+#include "sediento.h"
+#include "triste.h"
+#include "muerto.h"
+
+#define SCREEN_WIDTH 128       // Ancho de la pantalla OLED
+#define SCREEN_HEIGHT 64       // Alto de la pantalla OLED
+#define OLED_ADDRESS 0x3C      // Dirección I2C de la pantalla OLED
+#define DHTPIN 33              // Pin donde está conectado el DHT22
+#define DHTTYPE DHT22          // Tipo de sensor DHT (DHT22)
+#define BUZZER_PIN 25          // Pin donde está conectado el buzzer
+
+// Objeto para conexión WiFi y MQTT
+WiFiClient esp32Client;
+PubSubClient mqttClient(esp32Client);
+
+// Credenciales de WiFi
+const char* ssid = "Masita";
+const char* password = "wilson2020";
+
+// Configuración del servidor MQTT
+const char* server = "broker.emqx.io";
+int port = 1883;
+
+// Configuración de servidor NTP para obtener fecha y hora
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = -3 * 3600;  // Zona horaria
+const int daylightOffset_sec = 0;
+
+// Objetos para la pantalla OLED y el sensor DHT
+Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
+DHT dht(DHTPIN, DHTTYPE);
+
+// Función para conectar a WiFi
+void wifiInit() {
+    Serial.print("Conectándose a ");
+    Serial.println(ssid);
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        Serial.print(".");    // Espera a que se conecte a WiFi
+        delay(500);
+    }
+    Serial.println("\nConectado a WiFi");
+    Serial.print("Dirección IP: ");
+    Serial.println(WiFi.localIP());    // Imprime la IP obtenida
+}
+
+// Función que se ejecuta al recibir un mensaje MQTT
+void callback(char* topic, byte* payload, unsigned int length) {
+    Serial.print("Mensaje recibido en el tópico: ");
+    Serial.println(topic);
+
+    // Convierte el payload a string
+    String message = "";
+    for (int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
+    Serial.print("Mensaje: ");
+    Serial.println(message);
+
+    // Muestra diferentes imágenes en la OLED según el mensaje recibido
+    if (strcmp(topic, "actualizar") == 0) {
+        if (message == "muerto") {
+            display.clearDisplay();
+            display.drawBitmap(0, 0, muerto1, SCREEN_WIDTH, SCREEN_HEIGHT, SH110X_WHITE);
+            display.display();
+        } else if (message == "durmiendo") {
+            // Muestra una animación de "durmiendo"
+            display.clearDisplay();
+            display.drawBitmap(0, 0, durmiendo1, SCREEN_WIDTH, SCREEN_HEIGHT, SH110X_WHITE);
+            display.display();
+            delay(1000);
+            display.clearDisplay();
+            display.drawBitmap(0, 0, durmiendo2, SCREEN_WIDTH, SCREEN_HEIGHT, SH110X_WHITE);
+            display.display();
+            delay(1000);
+            display.clearDisplay();
+            display.drawBitmap(0, 0, durmiendo3, SCREEN_WIDTH, SCREEN_HEIGHT, SH110X_WHITE);
+            display.display();
+            delay(1000);
+            display.clearDisplay();
+            display.drawBitmap(0, 0, durmiendo4, SCREEN_WIDTH, SCREEN_HEIGHT, SH110X_WHITE);
+            display.display();
+            delay(1000);
+        }
+        // Repite el mismo patrón para "enojado", "normal", "sed", "triste"
+        // usando las imágenes correspondientes a cada estado.
+    }
+}
+
+// Función para reconectar al broker MQTT en caso de desconexión
+void reconnect() {
+    while (!mqttClient.connected()) {
+        Serial.print("Intentando conectarse MQTT...");
+        if (mqttClient.connect("ESP32MASITAClient")) {
+            Serial.println("Conectado");
+            mqttClient.subscribe("actualizar");  // Suscribe al ESP32 al tópico "actualizar"
+        } else {
+            Serial.print("Fallo, rc=");
+            Serial.print(mqttClient.state());
+            Serial.println(" intentar de nuevo en 5 segundos");
+            delay(5000);
+        }
+    }
+}
+
+// Configuración inicial de la ESP32
+void setup() {
+    Serial.begin(115200);            // Inicializa el puerto serial
+    wifiInit();                      // Conecta a WiFi
+    mqttClient.setServer(server, port);     // Configura el servidor MQTT
+    mqttClient.setCallback(callback);       // Configura la función de callback para MQTT
+
+    dht.begin();                     // Inicializa el sensor DHT
+    pinMode(BUZZER_PIN, OUTPUT);     // Configura el pin del buzzer como salida
+    digitalWrite(BUZZER_PIN, LOW);   // Apaga el buzzer inicialmente
+
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // Configura la hora NTP
+
+    // Inicializa la pantalla OLED
+    Wire.begin(21, 22);               // Configura los pines I2C
+    if (!display.begin(OLED_ADDRESS, OLED_ADDRESS)) {
+        Serial.println("Error al inicializar la pantalla OLED");
+        while (true);                 // Detiene el programa si no se inicializa
+    }
+    display.clearDisplay();           // Limpia la pantalla OLED
+}
+
+// Función principal que se ejecuta en bucle
+void loop() {
+    if (!mqttClient.connected()) {    // Verifica la conexión a MQTT
+        reconnect();                  // Reconecta si es necesario
+    }
+    mqttClient.loop();                // Mantiene activa la conexión MQTT
+
+    // Lee la humedad y temperatura del sensor DHT22
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    if (isnan(h) || isnan(t)) {       // Verifica si la lectura es válida
+        Serial.println("Error al leer el DHT!");
+        return;
+    }
+
+    // Obtiene la hora actual
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+
+    // Crea mensajes JSON y los publica en diferentes tópicos de MQTT
+    StaticJsonBuffer<200> JSONencoder;
+    JsonObject& JSONmessageTemperature = JSONencoder.createObject();
+    JSONmessageTemperature["temperatura"] = t;
+    char JSONmessageBuffer[300];
+    JSONmessageTemperature.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+    mqttClient.publish("temperatura", JSONmessageBuffer);   // Publica la temperatura
+
+    JsonObject& JSONmessageHumidity = JSONencoder.createObject();
+    JSONmessageHumidity["humedad"] = h;
+    JSONmessageHumidity.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+    mqttClient.publish("humedad", JSONmessageBuffer);       // Publica la humedad
+
+    JsonObject& JSONmessageTimestamp = JSONencoder.createObject();
+    char timestampString[30];
+    strftime(timestampString, sizeof(timestampString), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    JSONmessageTimestamp["timestamp"] = timestampString;
+    JSONmessageTimestamp.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+    mqttClient.publish("timestamp", JSONmessageBuffer);     // Publica el timestamp
+
+    // Activa o desactiva el buzzer si la humedad supera el 70%
+    JsonObject& JSONmessageBuzzer = JSONencoder.createObject();
+    if (h > 70.0) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        JSONmessageBuzzer["buzzer"] = "encendido";
+    } else {
+        digitalWrite(BUZZER_PIN, LOW);
+        JSONmessageBuzzer["buzzer"] = "apagado";
+    }
+    JSONmessageBuzzer.prettyPrintTo(JSONmessageBuffer, sizeof(JSONmessageBuffer));
+    mqttClient.publish("estado/buzzer", JSONmessageBuffer); // Publica el estado del buzzer
+
+    // Muestra en el monitor serial los datos enviados
+    Serial.println(JSONmessageBuffer);
+
+    delay(5000);  // Espera de 5 segundos antes de repetir el ciclo
+}
